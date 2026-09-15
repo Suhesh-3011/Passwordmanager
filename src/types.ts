@@ -72,6 +72,10 @@ export interface EncryptedPayload {
   salt: string;
   authChallengeHash: string;
   version: number;
+  recoverySalt?: string;
+  recoveryIv?: string;
+  recoveryCiphertext?: string;
+  recoveryChallengeHash?: string;
 }
 
 export interface PairedDevice {

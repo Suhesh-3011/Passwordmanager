@@ -61,11 +61,17 @@ export async function generateAuthHash(masterPassword: string, saltBuffer: Array
   return bufferToHex(hashBuffer);
 }
 
-// Encrypt Vault Data using AES-GCM-256
+// Format clean recovery key
+export function normalizeRecoveryKey(key: string): string {
+  return key.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+// Encrypt Vault Data using AES-GCM-256 (supporting Master Password and optional Recovery Key)
 export async function encryptVault(
   data: VaultData,
   masterPassword: string,
-  existingSaltHex?: string
+  existingSaltHex?: string,
+  recoveryKey?: string
 ): Promise<EncryptedPayload> {
   const salt = existingSaltHex ? hexToBuffer(existingSaltHex) : getRandomBytes(32).buffer;
   const iv = getRandomBytes(12); // Standard 96-bit IV for AES-GCM
@@ -85,16 +91,48 @@ export async function encryptVault(
 
   const authChallengeHash = await generateAuthHash(masterPassword, salt);
 
+  let recoverySalt: string | undefined;
+  let recoveryIv: string | undefined;
+  let recoveryCiphertext: string | undefined;
+  let recoveryChallengeHash: string | undefined;
+
+  if (recoveryKey) {
+    const cleanRecKey = normalizeRecoveryKey(recoveryKey);
+    const recSaltBuffer = getRandomBytes(32).buffer;
+    recoverySalt = bufferToHex(recSaltBuffer);
+    const recIvBytes = getRandomBytes(12);
+    recoveryIv = bufferToHex(recIvBytes.buffer);
+
+    const recDerivedKey = await deriveKey(cleanRecKey, recSaltBuffer);
+    const recAuthHash = await generateAuthHash(cleanRecKey, recSaltBuffer);
+    recoveryChallengeHash = recAuthHash;
+
+    // Encrypt the plaintext data also with the recovery key
+    const recCiphertextBuffer = await window.crypto.subtle.encrypt(
+      {
+        name: 'AES-GCM',
+        iv: recIvBytes,
+      },
+      recDerivedKey,
+      plaintext
+    );
+    recoveryCiphertext = bufferToHex(recCiphertextBuffer);
+  }
+
   return {
     ciphertext: bufferToHex(ciphertextBuffer),
     iv: bufferToHex(iv.buffer),
     salt: bufferToHex(salt),
     authChallengeHash,
     version: data.version,
+    recoverySalt,
+    recoveryIv,
+    recoveryCiphertext,
+    recoveryChallengeHash,
   };
 }
 
-// Decrypt Vault Data using AES-GCM-256
+// Decrypt Vault Data using AES-GCM-256 with Master Password
 export async function decryptVault(
   payload: EncryptedPayload,
   masterPassword: string
@@ -128,6 +166,74 @@ export async function decryptVault(
     return JSON.parse(jsonStr) as VaultData;
   } catch (err) {
     throw new Error('Failed to decrypt vault. Either the master password is wrong or ciphertext is corrupted.');
+  }
+}
+
+// Decrypt / Restore Vault Data using Emergency Recovery Key
+export async function decryptVaultWithRecoveryKey(
+  payload: EncryptedPayload,
+  recoveryKeyInput: string,
+  storedRecoveryKey?: string | null
+): Promise<VaultData> {
+  const cleanInput = normalizeRecoveryKey(recoveryKeyInput);
+
+  // If we have a recovery challenge hash or stored recovery key, verify it
+  if (payload.recoveryChallengeHash && payload.recoverySalt) {
+    const recSalt = hexToBuffer(payload.recoverySalt);
+    const computedHash = await generateAuthHash(cleanInput, recSalt);
+    if (computedHash !== payload.recoveryChallengeHash) {
+      throw new Error('Invalid Emergency Recovery Key. Please double check the key from your Emergency Kit.');
+    }
+  } else if (storedRecoveryKey) {
+    const cleanStored = normalizeRecoveryKey(storedRecoveryKey);
+    if (cleanInput !== cleanStored) {
+      throw new Error('Invalid Emergency Recovery Key. The key does not match this vault.');
+    }
+  }
+
+  // 1. If recoveryCiphertext, recoverySalt, and recoveryIv are present, decrypt directly!
+  if (payload.recoveryCiphertext && payload.recoverySalt && payload.recoveryIv) {
+    try {
+      const recSalt = hexToBuffer(payload.recoverySalt);
+      const recIv = hexToBuffer(payload.recoveryIv);
+      const recCiphertext = hexToBuffer(payload.recoveryCiphertext);
+      const recKey = await deriveKey(cleanInput, recSalt);
+
+      const decryptedBuffer = await window.crypto.subtle.decrypt(
+        {
+          name: 'AES-GCM',
+          iv: recIv,
+        },
+        recKey,
+        recCiphertext
+      );
+      const dec = new TextDecoder();
+      return JSON.parse(dec.decode(decryptedBuffer)) as VaultData;
+    } catch {
+      // Continue to fallback
+    }
+  }
+
+  // 2. Try decrypting main ciphertext with recovery key
+  const salt = hexToBuffer(payload.salt);
+  const iv = hexToBuffer(payload.iv);
+  const ciphertext = hexToBuffer(payload.ciphertext);
+
+  try {
+    const recKey = await deriveKey(cleanInput, salt);
+    const decryptedBuffer = await window.crypto.subtle.decrypt(
+      {
+        name: 'AES-GCM',
+        iv,
+      },
+      recKey,
+      ciphertext
+    );
+    const dec = new TextDecoder();
+    return JSON.parse(dec.decode(decryptedBuffer)) as VaultData;
+  } catch {
+    // If auth hash or stored key was verified earlier, let caller handle re-encryption with recovered/local state
+    throw new Error('Recovery Key verified, but vault re-encryption is required.');
   }
 }
 

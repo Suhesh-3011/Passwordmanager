@@ -18,12 +18,16 @@ export const VaultLockScreen: React.FC<VaultLockScreenProps> = ({
   onUnlock,
   onCreateVault,
   onSyncExistingVault,
+  onRestoreWithRecoveryKey,
   onImportPayload,
 }) => {
-  const [mode, setMode] = useState<'unlock' | 'create' | 'sync'>(hasExistingVault ? 'unlock' : 'create');
+  const [mode, setMode] = useState<'unlock' | 'create' | 'sync' | 'recovery'>(hasExistingVault ? 'unlock' : 'create');
   const [syncMethod, setSyncMethod] = useState<'file' | 'armor' | 'id'>('file');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [recoveryKeyInput, setRecoveryKeyInput] = useState('');
+  const [newMasterPassword, setNewMasterPassword] = useState('');
+  const [confirmNewMasterPassword, setConfirmNewMasterPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [syncVaultId, setSyncVaultId] = useState(vaultId || '');
   const [armorText, setArmorText] = useState('');
@@ -118,6 +122,36 @@ export const VaultLockScreen: React.FC<VaultLockScreenProps> = ({
     }
   };
 
+  const handleRecoverySubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!recoveryKeyInput.trim()) {
+      setErrorMessage('Please enter your 24-character Emergency Recovery Key.');
+      return;
+    }
+    if (!newMasterPassword) {
+      setErrorMessage('Please enter a new Master Password.');
+      return;
+    }
+    if (newMasterPassword.length < 8) {
+      setErrorMessage('New Master Password must be at least 8 characters.');
+      return;
+    }
+    if (newMasterPassword !== confirmNewMasterPassword) {
+      setErrorMessage('New master passwords do not match.');
+      return;
+    }
+
+    setLoading(true);
+    setErrorMessage(null);
+    try {
+      await onRestoreWithRecoveryKey(recoveryKeyInput.trim(), newMasterPassword);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Failed to recover vault. Check your Recovery Key.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const copyRecoveryKey = () => {
     navigator.clipboard.writeText(generatedRecoveryKey);
     setRecoveryKeyAcknowledged(true);
@@ -178,6 +212,15 @@ export const VaultLockScreen: React.FC<VaultLockScreenProps> = ({
             >
               Sync Device
             </button>
+            <button
+              type="button"
+              onClick={() => { setMode('recovery'); setErrorMessage(null); }}
+              className={`flex-1 py-2 text-xs font-medium rounded-md transition-all ${
+                mode === 'recovery' ? 'bg-amber-900/60 text-amber-200 shadow-sm border border-amber-700/50' : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Recover
+            </button>
           </div>
 
           {errorMessage && (
@@ -232,7 +275,15 @@ export const VaultLockScreen: React.FC<VaultLockScreenProps> = ({
                 )}
               </button>
 
-              <div className="pt-2 text-center">
+              <div className="pt-2 flex flex-col items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => { setMode('recovery'); setErrorMessage(null); }}
+                  className="text-xs text-amber-400 hover:text-amber-300 transition-colors flex items-center gap-1.5 font-medium"
+                >
+                  <KeyRound className="w-3.5 h-3.5" />
+                  <span>Forgot Master Password? Use Emergency Recovery Key</span>
+                </button>
                 <button
                   type="button"
                   onClick={() => { setMode('sync'); setErrorMessage(null); }}
@@ -450,6 +501,104 @@ export const VaultLockScreen: React.FC<VaultLockScreenProps> = ({
                 </button>
               </form>
             </div>
+          )}
+
+          {/* MODE: EMERGENCY RECOVERY KEY RESTORE */}
+          {mode === 'recovery' && (
+            <form onSubmit={handleRecoverySubmit} className="space-y-4">
+              <div className="p-3.5 rounded-xl bg-amber-950/40 border border-amber-800/60 text-amber-200 text-xs">
+                <div className="flex items-center gap-2 font-semibold text-amber-300 mb-1">
+                  <KeyRound className="w-4 h-4" />
+                  <span>Emergency Vault Recovery</span>
+                </div>
+                <p className="text-[11px] text-amber-300/80 leading-relaxed">
+                  Enter the 24-character Emergency Recovery Key generated when your vault was created. You will be prompted to choose a new Master Password.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                  Emergency Recovery Key
+                </label>
+                <input
+                  type="text"
+                  value={recoveryKeyInput}
+                  onChange={(e) => setRecoveryKeyInput(e.target.value)}
+                  placeholder="AEGIS-XXXX-XXXX-XXXX-XXXX"
+                  required
+                  autoFocus
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-amber-300 font-mono placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500 transition-all uppercase"
+                />
+                <span className="text-[11px] text-slate-500 mt-1 block">
+                  Found in your saved Emergency Kit document (e.g. AEGIS-A1B2-C3D4-E5F6-G7H8)
+                </span>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                  Set New Master Password
+                </label>
+                <div className="relative">
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    value={newMasterPassword}
+                    onChange={(e) => setNewMasterPassword(e.target.value)}
+                    placeholder="Enter new master password (min 8 chars)"
+                    required
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500 transition-all pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 p-1"
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                  Confirm New Master Password
+                </label>
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  value={confirmNewMasterPassword}
+                  onChange={(e) => setConfirmNewMasterPassword(e.target.value)}
+                  placeholder="Confirm new master password"
+                  required
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50 focus:border-amber-500 transition-all"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={loading || !recoveryKeyInput.trim() || !newMasterPassword}
+                className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-amber-500/20 active:scale-[0.99]"
+              >
+                {loading ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>Verifying Recovery Key & Re-encrypting...</span>
+                  </>
+                ) : (
+                  <>
+                    <KeyRound className="w-4 h-4" />
+                    <span>Recover Vault & Unlock</span>
+                  </>
+                )}
+              </button>
+
+              <div className="pt-2 text-center">
+                <button
+                  type="button"
+                  onClick={() => { setMode('unlock'); setErrorMessage(null); }}
+                  className="text-xs text-slate-400 hover:text-slate-200 transition-colors"
+                >
+                  Remembered your password? Back to Unlock
+                </button>
+              </div>
+            </form>
           )}
         </div>
 

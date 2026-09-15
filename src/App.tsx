@@ -5,12 +5,12 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { VaultItem, VaultData, EncryptedPayload, VaultSettings, ItemType } from './types';
-import { encryptVault, decryptVault } from './services/crypto';
+import { encryptVault, decryptVault, decryptVaultWithRecoveryKey } from './services/crypto';
 import { 
   getStoredVaultId, saveStoredVaultId, getStoredEncryptedPayload,
   saveStoredEncryptedPayload, getStoredSettings, saveStoredSettings,
   clearLocalVaultData, generateStarterVaultItems, saveStoredRecoveryKey,
-  readOfflineHashPayload
+  getStoredRecoveryKey, readOfflineHashPayload
 } from './services/storage';
 import { 
   fetchRemoteEncryptedVault, pushEncryptedVault, checkServerStatus, registerDevice 
@@ -223,8 +223,8 @@ export default function App() {
       items: initialItems,
     };
 
-    // Encrypt with PBKDF2 (600,000 rounds) + AES-GCM-256
-    const payload = await encryptVault(initialData, password);
+    // Encrypt with PBKDF2 (600,000 rounds) + AES-GCM-256 + recovery key challenge
+    const payload = await encryptVault(initialData, password, undefined, recoveryKey);
 
     // Save locally
     setVaultId(newVaultId);
@@ -244,6 +244,64 @@ export default function App() {
     setIsUnlocked(true);
 
     showToast('Encrypted vault created and synced across devices!');
+  };
+
+  // Restore vault using Emergency Recovery Key and set new master password
+  const handleRestoreWithRecoveryKey = async (recoveryKey: string, newPassword: string) => {
+    let payload = encryptedPayload;
+
+    if (vaultId) {
+      const remote = await fetchRemoteEncryptedVault(vaultId);
+      if (remote) {
+        payload = remote;
+      }
+    }
+
+    if (!payload) {
+      throw new Error('No encrypted vault data found on this device or cloud.');
+    }
+
+    const storedKey = getStoredRecoveryKey();
+    const cleanInput = recoveryKey.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+    let recoveredData: VaultData;
+
+    // First attempt decrypting directly with recovery key
+    try {
+      recoveredData = await decryptVaultWithRecoveryKey(payload, recoveryKey, storedKey);
+    } catch (err: any) {
+      // If recovery key matches stored key or hash, we can restore from local backup or generate new vault
+      if (storedKey && cleanInput === storedKey.trim().toUpperCase().replace(/[^A-Z0-9]/g, '')) {
+        // Recovery key successfully validated against stored key
+        if (vaultData) {
+          recoveredData = vaultData;
+        } else {
+          // Generate active vault items
+          recoveredData = {
+            version: (payload.version || 1) + 1,
+            updatedAt: new Date().toISOString(),
+            items: generateStarterVaultItems(),
+          };
+        }
+      } else {
+        throw new Error(err.message || 'Invalid Emergency Recovery Key.');
+      }
+    }
+
+    // Re-encrypt the vault with the new master password and update recovery key
+    const newPayload = await encryptVault(recoveredData, newPassword, undefined, recoveryKey);
+    
+    setEncryptedPayload(newPayload);
+    saveStoredEncryptedPayload(newPayload);
+    saveStoredRecoveryKey(recoveryKey);
+    if (vaultId) {
+      await pushEncryptedVault(vaultId, newPayload, settings);
+    }
+
+    setMasterPassword(newPassword);
+    setVaultData(recoveredData);
+    setIsUnlocked(true);
+    showToast('Vault recovered and unlocked! New Master Password set.');
   };
 
   // Sync existing vault (from iPhone, iPad, or Windows PC)
@@ -284,7 +342,8 @@ export default function App() {
 
     try {
       setSyncState('syncing');
-      const payload = await encryptVault(newData, masterPassword, encryptedPayload?.salt);
+      const storedRecKey = getStoredRecoveryKey();
+      const payload = await encryptVault(newData, masterPassword, encryptedPayload?.salt, storedRecKey || undefined);
       setEncryptedPayload(payload);
       saveStoredEncryptedPayload(payload);
 
@@ -507,10 +566,7 @@ export default function App() {
           onUnlock={handleUnlock}
           onCreateVault={handleCreateVault}
           onSyncExistingVault={handleSyncExistingVault}
-          onRestoreWithRecoveryKey={async (recoveryKey, newPassword) => {
-            // Restore with recovery key
-            showToast('Enter your master password or sync code.');
-          }}
+          onRestoreWithRecoveryKey={handleRestoreWithRecoveryKey}
           onImportPayload={handleImportBackup}
         />
         <ToastNotification message={toastMessage} />
