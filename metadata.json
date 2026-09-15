@@ -1,0 +1,7 @@
+{
+  "name": "AegisVault - E2EE Password Manager",
+  "description": "Zero-knowledge end-to-end encrypted personal password vault with seamless multi-device sync across phone, iPad, and Windows laptop.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
